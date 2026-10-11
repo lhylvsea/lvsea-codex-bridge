@@ -1,0 +1,36 @@
+{
+  "shared": {
+    "cwd": "D:\\Workspaces\\wechat-bridge-work",
+    "allowedUserIds": [
+      "replace-with-verified-from_user_id"
+    ],
+    "defaultVerboseLevel": 1,
+    "executor": "direct",
+    "tasksDb": "",
+    "rateLimitMaxRequests": 10,
+    "rateLimitWindowMs": 60000,
+    "idleTimeoutMs": 1800000,
+    "resetOnIdleMs": 0
+  },
+  "backends": {
+    "claude": {
+      "enabled": false,
+      "sessionsDb": "sessions.db",
+      "model": "claude-sonnet-4-6",
+      "permissionMode": "default"
+    },
+    "codex": {
+      "enabled": true,
+      "sessionsDb": "sessions-codex.db",
+      "model": ""
+    },
+    "gemini": {
+      "enabled": false,
+      "sessionsDb": "sessions-gemini.db",
+      "model": "gemini-2.5-pro",
+      "oauthClientId": "",
+      "oauthClientSecret": "",
+      "googleCloudProject": ""
+    }
+  }
+}

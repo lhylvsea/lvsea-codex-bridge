@@ -1,305 +1,154 @@
-<div align="center">
+# lvsea-codex-bridge
 
-# wechat-ai-bridge
+通过微信私聊调用本机 Codex 的可复现 Windows Bridge。
 
-**Claude Code and Codex. In WeChat Private Chat.**
+实际链路：
 
-*Run local Claude Code or Codex agent sessions from WeChat, with Claude tool approval and file relay.*
+~~~text
+微信私聊 -> 腾讯 iLink Bot -> 本地 wechat-ai-bridge
+        -> Codex SDK/CLI -> 本机工作目录 -> 微信回复
+~~~
 
-A self-hosted bridge that uses WeChat's iLink bot endpoints. The WeChat transport itself needs no separate tunnel where iLink is available; each AI backend still needs its normal network access and account eligibility.
+这个仓库基于 [AliceLJY/wechat-ai-bridge](https://github.com/AliceLJY/wechat-ai-bridge)，保留上游的微信 iLink、会话管理、文件传输和后端适配能力，并补充了本机实际跑通时用到的 Codex 路径修复、Windows 常驻任务、状态检查、故障定位和验收记录。
 
-[![MIT License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.2.0-green.svg)](https://github.com/AliceLJY/wechat-ai-bridge/releases)
-[![Bun](https://img.shields.io/badge/Runtime-Bun-f9f1e1?logo=bun)](https://bun.sh)
-[![WeChat](https://img.shields.io/badge/Interface-WeChat-07C160?logo=wechat)](https://weixin.qq.com/)
+它不是 OpenAI、微信或腾讯的官方项目，也不保证任何账号、模型或平台长期可用。请只在你有权使用的账号和工作目录上运行。
 
-**English** | [简体中文](README_CN.md)
+## 先看结论
 
-</div>
+- 微信只需要私聊 iLink Bot，不需要公网 IP 或额外穿透。
+- shared.allowedUserIds 必须填写精确的 iLink from_user_id，不能填昵称、微信号或猜测值。
+- 首次登录扫码必须在有效期内完成；二维码过期后重新启动登录流程即可。
+- Codex 的关键是让 Bridge 使用当前可用的 codex.exe，不要让旧 SDK 内置二进制解析新的全局 config.toml。
+- 长期运行不要依赖 Codex 的终端窗口。使用仓库内的 S4U 计划任务脚本，任务名称默认为 Codex-WeChat-Bridge。
+- config.json、令牌、SQLite、同步游标、下载文件和运行日志均是本机私有数据，已经加入忽略规则，不能提交。
 
-> **How is this different from cc-weixin / wechat-acp?**
->
-> This project focuses on **session management** (`/new` `/resume` `/sessions`), **backend selection** (Claude + Codex), **Claude tool approval**, and **bidirectional file relay** — the same workflow family as [telegram-ai-bridge](https://github.com/AliceLJY/telegram-ai-bridge), now using WeChat transport.
+## 快速开始
 
-> **Do not use the `gemini` backend. This is an account-safety issue, not just a dead feature.**
->
-> This adapter reads `~/.gemini/oauth_creds.json` and reuses the Gemini CLI's own OAuth
-> client to reach the internal Code Assist endpoint `cloudcode-pa.googleapis.com`.
-> Google's FAQ names this exact pattern: *"Using third-party software, tools, or services
-> to harvest or piggyback on Gemini CLI's OAuth authentication to access our backend
-> services is a direct violation of our applicable terms and policies"*, and says it
-> *"may be grounds for immediate suspension or termination of your account."* Paid
-> subscribers have reportedly lost access over it. **This applies regardless of your plan
-> tier — the prohibited thing is the mechanism, not the account type.**
->
-> Separately, Google retired the standalone `gemini` CLI for personal accounts on
-> 2026-06-18, so `oauth_creds.json` is no longer produced and the adapter cannot
-> authenticate there either. Its successor, the Antigravity CLI (`agy`), does not write a
-> drop-in replacement.
->
-> The supported way for third-party software to reach Gemini models is a **Vertex AI or
-> Google AI Studio API key**.
->
-> Claude and Codex backends are unaffected.
+### 前置条件
 
----
+- Windows 10/11
+- Bun 1.3.9 或更高版本
+- 已安装并登录 Codex CLI 或 Codex Desktop，且本机存在可执行的 codex.exe
+- 可以使用微信 iLink Bot，并能访问 iLink 和所选模型服务
+- 一个只给本地 Bridge 使用的工作目录
 
-## What This Unlocks
+### 安装和配置
 
-### Local Coding Agents from WeChat
+~~~powershell
+git clone https://github.com/lhylvsea/lvsea-codex-bridge.git
+cd lvsea-codex-bridge
+bun install
+bun run bootstrap --backend codex
+~~~
 
-Send a message in WeChat and run a Claude Code or Codex turn on the bridge host. Available tools and filesystem access come from the selected SDK/CLI and its local configuration. The workflow requires WeChat/iLink and the selected model provider to be reachable.
+编辑生成的 config.json：
 
-### Session Management
-
-```
-你: /new              ← Start a fresh session
-你: /sessions         ← List recent sessions
-你: /resume 3         ← Pick up where you left off
-你: /backend codex    ← Switch backend
-你: /model            ← Switch models (reply with number)
-```
-
-Bridge session mappings and preferences persist in SQLite. Claude and Codex sessions can be discovered from their local session stores and resumed after restart. The experimental Gemini adapter keeps its conversation history in memory, so that history does not survive a bridge restart. `/sessions` lists sessions discoverable for the active backend; resume by number with `/resume 3`.
-
-### Multi-Backend Support
-
-| Backend | Integration and capability | Status |
-|---------|----------------------------|--------|
-| `claude` | Agent SDK + local Claude executable; agent tools, resumable sessions, bridge-mediated tool approval | Recommended |
-| `codex` | Codex SDK/CLI; agent tools and resumable threads, without bridge-mediated approval prompts | Recommended |
-| `gemini` | Google Code Assist API text generation with in-memory history; no local tool execution | Retired for personal accounts — see note below |
-
-Select the backend at startup with `--backend`. `/backend` can switch only among adapters explicitly loaded by an advanced multi-adapter deployment.
-
-### Claude Tool Approval via Chat
-
-When the Claude backend asks for permission to run a tool:
-
-```
-🔒 工具审批
-
-工具: Bash
-git push origin main
-
-请回复数字:
-1. 允许
-2. 拒绝
-3. 始终允许 "Bash"
-4. YOLO（全部允许）
-```
-
-Reply `1`, `2`, `3`, or `4`. No buttons needed — just text.
-
-### Bidirectional File Relay
-
-- **Send photos/files to Claude or Codex**: WeChat media is downloaded, decrypted (AES-128-ECB), stored under local `files/` with a sanitized portable filename, and passed to the agent as a local path
-- **Receive files from Claude or Codex**: detected local output files and screenshots are sent only when both their lexical and real paths resolve to a regular file under that chat's current working directory. Hidden paths, control characters, common auth/config/credential/key/log/OAuth/secret/session/token names, symlink escapes, oversized files, and inbound `files/` uploads are rejected before reading.
-- **Long output**: messages over 2000 chars are auto-split into multiple messages, with code fences kept intact
-
-The experimental Gemini text backend cannot read the downloaded local file by itself because it has no local tools.
-
-### Data and Trust Boundaries
-
-- **Local by default**: bridge config, token, SQLite session/task mappings, and decrypted inbound file copies are stored on the bridge host.
-- **Fail-closed sender authorization**: only exact iLink `from_user_id` values listed in `shared.allowedUserIds` are processed. Unknown senders are rejected before media download, approval handling, commands, or model calls.
-- **WeChat transport**: messages and context tokens pass through iLink endpoints; media is downloaded from or uploaded to the WeChat CDN.
-- **Model providers**: prompts and any context selected by the agent follow the data handling of the configured Claude, OpenAI, or Google backend. They do not remain exclusively on the bridge host.
-- **Host access**: this bridge is not a sandbox. Claude Code and Codex run with the filesystem and process permissions granted to their local CLI/SDK configuration. Bridge-mediated tool approval currently applies only to Claude.
-
-### Built-in Resilience
-
-- **Rate limiting**: Per-user sliding window
-- **Idle monitoring**: Watchdog timer for hung tasks
-- **Message batching**: FlushGate merges rapid consecutive messages (800ms window)
-- **Send retry**: Exponential backoff with error classification
-- **File reference protection**: Prevents auto-linking of `.md`, `.go`, `.py` filenames
-
----
-
-## Quick Start
-
-**Prerequisites:** [Bun](https://bun.sh) runtime, WeChat version >= 2026.3.20, and at least one backend CLI: [Claude Code](https://docs.anthropic.com/en/docs/claude-code) or [Codex](https://openai.com/index/codex/).
-
-```bash
-git clone https://github.com/AliceLJY/wechat-ai-bridge.git
-cd wechat-ai-bridge
-npm install              # or: bun install
-bun run bootstrap --backend claude
-# Edit config.json and set shared.allowedUserIds to verified iLink from_user_id values.
-bun run check --backend claude
-bun run start --backend claude
-```
-
-On first launch, a QR code appears in your terminal. Scan it with WeChat to authenticate. Token is saved to `~/.wechat-ai-bridge/token.json` for subsequent launches.
-
-`shared.allowedUserIds` is required and starts empty. Use exact, independently verified iLink `from_user_id` strings—not a display name, WeChat alias, or guessed value. The bridge never auto-claims the first contact. Validation fails while the list is empty; rejected sender IDs are written only to the local process log and are never added automatically. `start.js` serializes the configured list into the internal `WECHAT_ALLOWED_USER_IDS` environment variable before loading the bridge.
-
-On POSIX hosts, the bridge enforces mode `0600` on `config.json` and `~/.wechat-ai-bridge/token.json`, and mode `0700` on `~/.wechat-ai-bridge/` and the inbound `files/` directory. It refuses symbolic links for these private paths; Windows deployments should also restrict these paths with local ACLs.
-
----
-
-## WeChat Commands
-
-All commands are plain text — just type and send:
-
-| Command | Description |
-|---------|-------------|
-| `/help` | Show all commands |
-| `/new` | Start a new session |
-| `/cancel` | Abort the running task |
-| `/sessions` | List recent sessions |
-| `/resume <#\|id>` | Resume by sequence number or session ID |
-| `/backend [name]` | Switch backend (claude/codex) |
-| `/model [name]` | Pick a model (reply with number) |
-| `/effort [level]` | Set thinking depth |
-| `/status` | Show backend, model, cwd, session |
-| `/dir [path|-]` | Switch working directory; `-` returns to the previous directory |
-| `/verbose 0\|1\|2` | Change progress verbosity |
-
----
-
-## How It Works
-
-```
-WeChat App ←→ iLink Server (ilinkai.weixin.qq.com) ←→ wechat-ai-bridge ←→ AI Backend
-                                                         │
-                                                         ├── weixin/     (iLink connection)
-                                                         ├── adapters/   (Claude/Codex/Gemini)
-                                                         ├── sessions.js (SQLite persistence)
-                                                         └── bridge.js   (core message loop)
-```
-
-The bridge uses WeChat **iLink bot endpoints**. Communication is HTTP/JSON with long-polling (`getupdates`), similar to Telegram's Bot API. Media files use the protocol's AES-128-ECB encryption before CDN upload.
-
-The source code can show which endpoints it calls, but it cannot guarantee platform status, account eligibility, continued availability, or zero enforcement risk. Check the current WeChat terms that apply to your account and deployment.
-
----
-
-## vs. Existing Projects
-
-| Feature | cc-weixin | wechat-acp | This project |
-|---------|-----------|------------|-------------|
-| AI backends | Claude only | 6 via ACP | Claude + Codex agents |
-| Session management | None | None | `/new` `/resume` `/sessions` `/backend` |
-| Tool approval | Auto-allow | Auto-allow | Interactive for Claude; no bridge approval prompt for Codex/Gemini |
-| Model switching | Hardcoded | Per-preset | `/model` with numbered selection |
-| File relay (in) | Text only | Images+files | Local-path relay for tool-capable Claude/Codex backends |
-| File relay (out) | None | None | Auto-detect local paths + encrypted WeChat CDN upload |
-| Rate limiting | None | None | Per-user sliding window |
-| Idle monitoring | None | None | Watchdog + auto-reset |
-| Message batching | None | None | FlushGate (800ms merge) |
-| Cross-platform sessions | None | None | Discover local Claude/Codex sessions (CLI + other bridges) |
-
-Comparison entries describe the projects as reviewed on 2026-07-17 and may change upstream.
-
----
-
-<details>
-<summary><strong>Configuration</strong></summary>
-
-`bun run bootstrap --backend claude` generates a starter `config.json`.
-
-```json
+~~~json
 {
   "shared": {
-    "cwd": "/Users/you",
+    "cwd": "D:\\Workspaces\\wechat-bridge-work",
     "allowedUserIds": ["replace-with-verified-from_user_id"],
     "defaultVerboseLevel": 1,
     "executor": "direct",
+    "tasksDb": "",
     "rateLimitMaxRequests": 10,
     "rateLimitWindowMs": 60000,
-    "idleTimeoutMs": 1800000
+    "idleTimeoutMs": 1800000,
+    "resetOnIdleMs": 0
   },
   "backends": {
-    "claude": {
+    "codex": {
       "enabled": true,
-      "sessionsDb": "sessions.db",
-      "model": "claude-sonnet-4-7",
-      "permissionMode": "default"
+      "sessionsDb": "sessions-codex.db",
+      "model": ""
     }
   }
 }
-```
+~~~
 
-</details>
+shared.cwd 必须是已经存在的目录。完整的脱敏模板见 [docs/config.example.json](docs/config.example.json)。
 
-<details>
-<summary><strong>Project Structure</strong></summary>
+### 确认 Codex 路径
 
-- `start.js` — CLI entry with QR login flow
-- `config.js` — Config loader and setup wizard
-- `bridge.js` — Core message loop
-- `progress.js` — Typing indicator + processing status
-- `sessions.js` — SQLite session persistence
-- `weixin/api.js` — iLink HTTP client
-- `weixin/auth.js` — QR code login + token persistence
-- `weixin/monitor.js` — Long-polling message listener
-- `weixin/send.js` — Message sending + text chunking
-- `weixin/media.js` — CDN upload/download + AES-128-ECB
-- `inbound-files.js` — Portable filename sanitization + download containment
-- `runtime-paths.js` — Cross-platform home-directory resolution
-- `weixin/types.js` — iLink protocol constants
-- `adapters/` — AI backend integrations (Claude/Codex/Gemini)
-- `executor/` — Execution modes
+优先把路径作为启动参数传入。当前本机验证过的路径是 C:\Codex\app\resources\codex.exe，其他机器不要照抄，改成自己的实际路径。
 
-</details>
+~~~powershell
+powershell -ExecutionPolicy Bypass -File .\start-codex-bridge.ps1 -CodexPath "C:\path\to\codex.exe"
+~~~
 
-<details>
-<summary><strong>iLink Protocol Notes</strong></summary>
+启动脚本按以下顺序找可执行文件：命令行中的参数、环境变量、系统 PATH、常见安装目录、当前验证过的 Codex Desktop 路径。找不到时会直接报出修复提示，不会静默使用未知二进制。
 
-- **Authentication**: QR code scan → `bot_token` (persisted locally to `~/.wechat-ai-bridge/token.json`)
-- **Message flow**: `getupdates` long-poll (35s hold) → process → `sendmessage` with `context_token`
-- **Media**: AES-128-ECB encrypted CDN (`novac2c.cdn.weixin.qq.com`)
-- **Limitation**: 1 WeChat account = 1 bot (1:1 binding)
-- **No group chat**: the current bridge supports private messaging only
-- **Policy boundary**: endpoint availability and account eligibility remain subject to current WeChat terms
+### 首次扫码和白名单
 
-</details>
+先执行前台验收：
 
----
+~~~powershell
+powershell -ExecutionPolicy Bypass -File .\start-codex-bridge.ps1 -CodexPath "C:\path\to\codex.exe"
+~~~
 
-## Adding Custom Backends
+首次运行会在当前窗口显示二维码。用微信扫码，成功后令牌保存在用户目录的 .wechat-ai-bridge/token.json，不会写入仓库。
 
-The adapter interface is designed for easy extension. To add a new AI backend (e.g. [OpenCode](https://opencode.ai/), [Crush](https://github.com/charmbracelet/crush), or any CLI agent):
+如果还没有真实的 from_user_id，先不要把昵称或微信号当作白名单。用本地启动日志确认精确 ID，写入本机 config.json 的 shared.allowedUserIds 后，重新执行：
 
-1. Create `adapters/yourbackend.js` exporting `createAdapter(config)`:
+~~~powershell
+bun run check --backend codex
+~~~
 
-```js
-export function createAdapter(config = {}) {
-  return {
-    name: "yourbackend",
-    async *streamQuery({ prompt, sessionId, model, cwd, abortController }) {
-      yield { type: "session_init", sessionId: "..." };
-      yield { type: "text", text: "response chunk" };
-      yield { type: "result", success: true, text: "final answer" };
-    },
-    statusInfo() {
-      return { backend: "yourbackend", model: "...", session: "..." };
-    }
-  };
-}
-```
+白名单为空、格式错误或工作目录不存在时，检查必须失败。检查通过后，从微信私聊发送一条短消息，确认能收到回复。
 
-2. Register it in `adapters/interface.js` and add the name to `AVAILABLE_BACKENDS` in `config.js`.
+### 安装为常驻服务
 
-Event types: `session_init` | `progress` (tool use indicators) | `text` (streaming chunks) | `result` (final).
+前台验收成功后，在仓库根目录执行：
 
-> **Community interest**: OpenCode / Crush support has been requested. OpenCode offers a [JS/TS SDK](https://opencode.ai/docs/sdk/) (`@opencode-ai/sdk`); Crush provides a [Unix socket REST API](https://github.com/charmbracelet/crush) with SSE streaming. PRs welcome!
+~~~powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\register-wechat-bridge-task.ps1 -CodexPath "C:\path\to\codex.exe"
+~~~
 
----
+脚本注册两个触发器：系统启动和当前用户登录；运行身份使用当前 Windows 用户的 S4U，不保存密码；异常退出后最多每分钟重启一次，重复启动时忽略新实例。
 
-## Ecosystem
+只读检查：
 
-Part of the **小试AI** open-source AI workflow:
+~~~powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\status-wechat-bridge.ps1
+~~~
 
-| Project | Description |
-|---------|-------------|
-| [telegram-ai-bridge](https://github.com/AliceLJY/telegram-ai-bridge) | Same architecture, Telegram interface |
-| [tg-bridge-channel](https://github.com/AliceLJY/tg-bridge-channel) | Sister bridge using Claude Agent View background sessions (channel/pool engine) |
-| [recallnest](https://github.com/AliceLJY/recallnest) | MCP memory workbench |
-| [openclaw-tunnel](https://github.com/AliceLJY/openclaw-tunnel) | Docker ↔ host CLI bridge |
+完整的启动、停止、重启、日志和验收步骤见：
 
-## License
+- [中文快速开始](docs/quick-start.zh-CN.md)
+- [故障复盘与根因](docs/troubleshooting.md)
+- [常驻运维手册](docs/operations.md)
+- [验收证据](docs/validation.md)
 
-MIT
+## 常用命令
+
+~~~powershell
+# 静态语法检查
+bun run check:syntax
+
+# 单元测试
+bun test
+
+# 检查当前本机配置和 Codex 前置条件
+bun run check --backend codex
+
+# 查看服务状态，不读取令牌
+powershell -ExecutionPolicy Bypass -File .\scripts\status-wechat-bridge.ps1
+
+# 手动重启计划任务
+Stop-ScheduledTask -TaskName "Codex-WeChat-Bridge"
+Start-ScheduledTask -TaskName "Codex-WeChat-Bridge"
+~~~
+
+## 安全边界
+
+- 只处理精确匹配白名单的 iLink 发起者。
+- Bridge 不是沙箱。Codex 获得的文件和进程权限取决于本机 Codex 配置及 Windows 用户权限。
+- 不要提交 config.json、.wechat-ai-bridge/token.json、*.db、files/、runtime-logs/ 或包含用户消息的临时文件。
+- 不要把真实 from_user_id、bot token、API key、OAuth 文件或完整运行日志写进 Issue、README 或截图。
+- 不要为解决 SDK 兼容性去修改全局 C:\Users\your-user\.codex\config.toml。优先使用 CODEX_PATH 指向当前可用的 Codex 二进制。
+- 当前项目面向微信私聊；不要假设群聊、跨账号复用、外网部署或重启后登录状态一定可用。
+- gemini 后端在上游代码中已禁用，不要为了“多一个后端”绕过该限制。
+
+## 上游与许可证
+
+核心实现来自 [AliceLJY/wechat-ai-bridge](https://github.com/AliceLJY/wechat-ai-bridge)，本仓库保留其 MIT 许可证和来源说明。新增的 Windows 启动与运维材料同样按 MIT 许可证发布，详见 [LICENSE](LICENSE)。

@@ -1,7 +1,7 @@
 {
   "name": "wechat-ai-bridge",
   "version": "1.2.0",
-  "description": "Self-hosted WeChat bridge for Claude Code and Codex, with an experimental Gemini text backend",
+  "description": "Self-hosted WeChat iLink bridge for Claude Code and Codex with a Windows Codex runbook",
   "type": "module",
   "scripts": {
     "start": "bun start.js start",
@@ -18,7 +18,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/AliceLJY/wechat-ai-bridge.git"
+    "url": "https://github.com/lhylvsea/lvsea-codex-bridge.git"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.141",

@@ -9,3 +9,7 @@ config.json
 files/
 .wechat-ai-bridge/
 bun.lock
+*.sqlite
+*.sqlite3
+*.pid
+*.tmp
